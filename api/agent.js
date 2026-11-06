@@ -99,18 +99,48 @@ async function gemini(model, contents, system) {
   return r.json();
 }
 
-// First call of a turn walks the fallback list; later calls retry the same model once.
-async function generate(contents, system, sticky) {
-  const tries = sticky ? [sticky, sticky] : MODELS;
-  for (const [i, model] of tries.entries()) {
-    try {
-      return { model, data: await gemini(model, contents, system) };
-    } catch (e) {
-      if (!RETRYABLE.has(e.status) || i === tries.length - 1) throw e;
-      console.warn(`${e.message} → trying ${tries[i + 1]}`);
-      if (sticky) await new Promise((ok) => setTimeout(ok, 1500));
+// One full agent turn on one model. Gemini's thought signatures only work with the model that produced them,
+// so if a model fails mid-turn the whole turn is replayed on the next model instead of switching halfway.
+async function runTurn(model, history0, profile0, lang) {
+  const history = [...history0];
+  let profile = profile0;
+  const trace = [];
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const data = await gemini(model, history, systemPrompt(profile, lang));
+    const content = data.candidates?.[0]?.content;
+    const calls = (content?.parts || []).filter((p) => p.functionCall);
+    if (!calls.length) {
+      const reply = (content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join('').replace(/[*#_`]/g, '').trim();
+      return { reply: reply || FALLBACK[lang], profile, trace };
     }
+    history.push(content); // keep the model's turn verbatim (thought signatures must round-trip)
+    const responses = await Promise.all(calls.map(async ({ functionCall: c }) => {
+      let response;
+      if (c.name === 'update_profile') {
+        const saved = clean(c.args);
+        profile = withImplied({ ...profile, ...saved });
+        response = { saved, ...summary(profile, lang) };
+        trace.push({ tool: c.name, args: saved, result: `${response.likelyEligible.length} likely · ${response.stillUndecided} undecided · next: ${response.askNext.map((a) => a.field).join(', ') || 'none'}` });
+      } else if (c.name === 'get_scheme_details') {
+        const s = SCHEMES.find((x) => x.id === c.args?.id);
+        response = s ? { name: s.name[lang], benefit: s.benefit[lang], caveat: s.note?.[lang], documents: s.documents[lang], howToApply: s.apply[lang], officialSite: s.url, rulesLastChecked: s.checked, ...(isStale(s) && { possiblyOutdated: true }) } : { error: 'unknown scheme id' };
+        trace.push({ tool: c.name, args: { id: c.args?.id }, result: s ? `${s.documents[lang].length} documents` : 'unknown id' });
+      } else if (c.name === 'scheme_not_in_list') {
+        const recorded = await recordRequest(c.args?.name);
+        response = {
+          inSaathiCheckedList: false, recorded,
+          officialSearch: 'https://www.myscheme.gov.in/search',
+          advice: "Say plainly that this scheme is not in Saathi's checked list yet, so you cannot tell whether they qualify. Do not describe its rules or amounts. Suggest asking at the Setu Kendra / CSC, or searching it on myScheme, the official government site (give the link). If recorded is true, say Saathi will look into adding it.",
+        };
+        trace.push({ tool: c.name, args: { name: String(c.args?.name || '').slice(0, 60) }, result: recorded ? 'not in list · request recorded' : 'not in list' });
+      } else {
+        response = { error: 'unknown tool' };
+      }
+      return { functionResponse: { name: c.name, ...(c.id && { id: c.id }), response } };
+    }));
+    history.push({ role: 'user', parts: responses });
   }
+  return { reply: FALLBACK[lang], profile, trace };
 }
 
 export default async function handler(req, res) {
@@ -120,7 +150,7 @@ export default async function handler(req, res) {
   // Trust boundary: everything from the browser is re-validated.
   const body = req.body || {};
   const lang = LANGS[body.lang] ? body.lang : 'mr';
-  let profile = clean(body.profile);
+  const profile = clean(body.profile);
   const history = (Array.isArray(body.messages) ? body.messages : [])
     .filter((m) => m && typeof m.text === 'string' && m.text.trim())
     .slice(-24)
@@ -129,50 +159,16 @@ export default async function handler(req, res) {
   if (!history.length) return res.status(400).json({ error: 'empty' });
   // ponytail: no global rate limit — the free-tier key's own quota is the ceiling; add Upstash/Vercel KV limits if traffic grows.
 
-  const trace = [];
-  let model;
-  try {
-    for (let step = 0; step < MAX_STEPS; step++) {
-      const out = await generate(history, systemPrompt(profile, lang), model);
-      model = out.model;
-      const data = out.data;
-      const content = data.candidates?.[0]?.content;
-      const calls = (content?.parts || []).filter((p) => p.functionCall);
-      if (!calls.length) {
-        const reply = (content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join('').replace(/[*#_`]/g, '').trim();
-        return res.status(200).json({ reply: reply || FALLBACK[lang], profile, trace });
-      }
-      history.push(content); // keep the model's turn verbatim (thought signatures must round-trip)
-      const responses = await Promise.all(calls.map(async ({ functionCall: c }) => {
-        let response;
-        if (c.name === 'update_profile') {
-          const saved = clean(c.args);
-          profile = withImplied({ ...profile, ...saved });
-          response = { saved, ...summary(profile, lang) };
-          trace.push({ tool: c.name, args: saved, result: `${response.likelyEligible.length} likely · ${response.stillUndecided} undecided · next: ${response.askNext.map((a) => a.field).join(', ') || 'none'}` });
-        } else if (c.name === 'get_scheme_details') {
-          const s = SCHEMES.find((x) => x.id === c.args?.id);
-          response = s ? { name: s.name[lang], benefit: s.benefit[lang], caveat: s.note?.[lang], documents: s.documents[lang], howToApply: s.apply[lang], officialSite: s.url, rulesLastChecked: s.checked, ...(isStale(s) && { possiblyOutdated: true }) } : { error: 'unknown scheme id' };
-          trace.push({ tool: c.name, args: { id: c.args?.id }, result: s ? `${s.documents[lang].length} documents` : 'unknown id' });
-        } else if (c.name === 'scheme_not_in_list') {
-          const recorded = await recordRequest(c.args?.name);
-          response = {
-            inSaathiCheckedList: false, recorded,
-            officialSearch: 'https://www.myscheme.gov.in/search',
-            advice: "Say plainly that this scheme is not in Saathi's checked list yet, so you cannot tell whether they qualify. Do not describe its rules or amounts. Suggest asking at the Setu Kendra / CSC, or searching it on myScheme, the official government site (give the link). If recorded is true, say Saathi will look into adding it.",
-          };
-          trace.push({ tool: c.name, args: { name: String(c.args?.name || '').slice(0, 60) }, result: recorded ? 'not in list · request recorded' : 'not in list' });
-        } else {
-          response = { error: 'unknown tool' };
-        }
-        return { functionResponse: { name: c.name, ...(c.id && { id: c.id }), response } };
-      }));
-      history.push({ role: 'user', parts: responses });
+  let lastError;
+  for (const model of MODELS) {
+    try {
+      return res.status(200).json(await runTurn(model, history, profile, lang));
+    } catch (e) {
+      lastError = e;
+      console.warn(e.message);
+      if (!RETRYABLE.has(e.status)) break;
     }
-    return res.status(200).json({ reply: FALLBACK[lang], profile, trace });
-  } catch (e) {
-    console.error(e.message);
-    const busy = RETRYABLE.has(e.status);
-    return res.status(busy ? 429 : 502).json({ error: busy ? 'busy' : 'failed', profile, trace });
   }
+  const busy = RETRYABLE.has(lastError?.status);
+  return res.status(busy ? 429 : 502).json({ error: busy ? 'busy' : 'failed', profile });
 }

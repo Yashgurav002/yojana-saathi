@@ -4,7 +4,7 @@
 
 Yojana Saathi is a voice-first AI agent for people who find government paperwork hard: homemakers, farmers, street vendors, artisans, daily-wage workers and elderly people. You tell it about your life in your own words. It asks a few simple questions, works out which schemes you are likely eligible for, and gives you the documents to carry and where to apply, ready to share on WhatsApp.
 
-**Live:** _deploy URL here_ · No login, no Aadhaar, no OTP.
+**Live:** https://yojana-saathi-rosy.vercel.app · No login, no Aadhaar, no OTP.
 
 ## Why this exists
 
