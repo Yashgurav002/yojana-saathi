@@ -5,9 +5,10 @@ import { FIELDS, clean, evaluate, askNext, isStale, withImplied } from '../lib/e
 
 // Tried in order when a model is overloaded, slow or retired. A turn sticks to one model, because Gemini's
 // thought signatures (echoed back during tool calls) are only valid for the model that produced them.
-// Measured on 2026-11-07 with a free key: 3.5-flash-lite ~1.5s per tool call and the roomiest free quota;
-// 3.5-flash / 3.6-flash ~5s and ran out of free daily quota first; 3.7 / 3.8 were overloaded.
-const MODELS = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.6-flash'].filter(Boolean))];
+// Measured on 2026-11-07 with a free key: 3.5-flash ~2-5s per tool call with the best extraction; 3.5-flash-lite
+// ~1.5-3s but once mixed a Telugu word into Marathi, so it is the fallback for per-minute quota bursts (429).
+// 3.7 / 3.8 were overloaded that night.
+const MODELS = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash'].filter(Boolean))];
 const RETRYABLE = new Set([404, 408, 429, 500, 503, 504]);
 const CALL_TIMEOUT_MS = 12000;
 const MAX_STEPS = 6;
@@ -55,7 +56,7 @@ function summary(profile, lang) {
 
 const systemPrompt = (profile, lang) => `You are Yojana Saathi ("scheme friend"), a patient helper for people in India who find government paperwork hard: homemakers, farmers, street vendors, artisans, daily-wage workers, elderly people. You help them find government schemes they are likely eligible for.
 
-LANGUAGE: Reply ONLY in ${LANGS[lang]}${lang === 'en' ? '' : ' (Devanagari script, simple everyday spoken words, not formal or Sanskritized)'}. Plain text only: no markdown, no bullet lists, no emojis. At most 3 short sentences. The person may be listening to your reply read aloud.
+LANGUAGE: Reply ONLY in ${LANGS[lang]}${lang === 'en' ? '' : ' (Devanagari script only, never any other Indian script; simple everyday spoken words, not formal or Sanskritized)'}. Plain text only: no markdown, no bullet lists, no emojis. At most 3 short sentences. The person may be listening to your reply read aloud.
 
 HOW TO WORK:
 1. Whenever the person states any fact about themselves or their family, call update_profile with ALL facts you can take from it. Convert naturally: "I stitch blouses at home" → occupation "artisan"; "my husband passed away" → maritalStatus "widowed"; "we earn 12 thousand a month" → annualFamilyIncome 144000; "I live in Pune" → state "Maharashtra"; feminine verb forms ("मी 42 वर्षांची आहे", "मैं 42 साल की हूँ") or "my husband" → gender "female", masculine forms → "male". Never invent facts they did not say.

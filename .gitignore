@@ -1,6 +1,6 @@
 node_modules
-.env
-.env.local
+.env*
+!.env.example
 .vercel
 scout/seen.json
 scout/report.md
