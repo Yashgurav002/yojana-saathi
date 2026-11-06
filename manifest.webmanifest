@@ -1,0 +1,10 @@
+{
+  "name": "Yojana Saathi · योजना साथी",
+  "short_name": "Yojana Saathi",
+  "description": "Find government schemes you are likely eligible for, by talking in Marathi, Hindi or English.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f6f2ea",
+  "theme_color": "#0e6b5c",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

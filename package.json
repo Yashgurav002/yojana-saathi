@@ -1,0 +1,7 @@
+{
+  "name": "yojana-saathi",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "node dev.mjs", "test": "node test.mjs" },
+  "engines": { "node": ">=20" }
+}

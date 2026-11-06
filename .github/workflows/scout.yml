@@ -1,0 +1,58 @@
+# Scheme Scout: every morning, the research agent reads new official press releases, drafts scheme changes,
+# re-checks stale rules, and opens a pull request. Nothing reaches users until a human merges it.
+name: Scheme Scout
+
+on:
+  schedule:
+    - cron: '30 1 * * *' # 07:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency: scout
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Remember which press releases were already read, without committing state to main.
+      - uses: actions/cache@v4
+        with:
+          path: scout/seen.json
+          key: scout-seen-${{ github.run_id }}
+          restore-keys: scout-seen-
+
+      - name: Run the Scout agent
+        run: node scout/scout.mjs
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+
+      - name: Validate (same quality gate as CI)
+        run: node test.mjs
+
+      - name: Open a pull request for human review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat scout/report.md >> "$GITHUB_STEP_SUMMARY"
+          if git diff --quiet -- lib/schemes.js; then
+            echo "No scheme changes today."
+            exit 0
+          fi
+          branch="scout/$(date +%F)-${{ github.run_id }}"
+          git config user.name "scheme-scout[bot]"
+          git config user.email "scheme-scout@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add lib/schemes.js
+          git commit -m "Scheme Scout: proposed updates for $(date +%F)"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" --title "Scheme Scout: proposed updates for $(date +%F)" --body-file scout/report.md

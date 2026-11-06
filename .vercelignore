@@ -1,0 +1,4 @@
+.env*
+!.env.example
+scout/seen.json
+scout/report.md
